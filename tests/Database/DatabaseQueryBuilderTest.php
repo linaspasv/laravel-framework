@@ -107,7 +107,7 @@ class DatabaseQueryBuilderTest extends TestCase
     public function testAddingSelects()
     {
         $builder = $this->getBuilder();
-        $builder->select('foo')->addSelect('bar')->addSelect(['baz', 'boom'])->from('users');
+        $builder->select('foo')->addSelect('bar')->addSelect(['baz', 'boom'])->addSelect('bar')->from('users');
         $this->assertSame('select "foo", "bar", "baz", "boom" from "users"', $builder->toSql());
     }
 
@@ -936,10 +936,44 @@ class DatabaseQueryBuilderTest extends TestCase
         $this->assertSame('select * from "users" where "id" in (?, ?, ?)', $builder->toSql());
         $this->assertEquals([0 => 1, 1 => 2, 2 => 3], $builder->getBindings());
 
+        // associative arrays as values:
+        $builder = $this->getBuilder();
+        $builder->select('*')->from('users')->whereIn('id', [
+            'issue' => 45582,
+            'id' => 2,
+            3,
+        ]);
+        $this->assertSame('select * from "users" where "id" in (?, ?, ?)', $builder->toSql());
+        $this->assertEquals([0 => 45582, 1 => 2, 2 => 3], $builder->getBindings());
+
+        // can accept some nested arrays as values.
+        $builder = $this->getBuilder();
+        $builder->select('*')->from('users')->whereIn('id', [
+            ['issue' => 45582],
+            ['id' => 2],
+            [3],
+        ]);
+        $this->assertSame('select * from "users" where "id" in (?, ?, ?)', $builder->toSql());
+        $this->assertEquals([0 => 45582, 1 => 2, 2 => 3], $builder->getBindings());
+
         $builder = $this->getBuilder();
         $builder->select('*')->from('users')->where('id', '=', 1)->orWhereIn('id', [1, 2, 3]);
         $this->assertSame('select * from "users" where "id" = ? or "id" in (?, ?, ?)', $builder->toSql());
         $this->assertEquals([0 => 1, 1 => 1, 2 => 2, 3 => 3], $builder->getBindings());
+    }
+
+    public function testBasicWhereInsException()
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $builder = $this->getBuilder();
+        $builder->select('*')->from('users')->whereIn('id', [
+            [
+                'a' => 1,
+                'b' => 1,
+            ],
+            ['c' => 2],
+            [3],
+        ]);
     }
 
     public function testBasicWhereNotIns()
@@ -998,6 +1032,15 @@ class DatabaseQueryBuilderTest extends TestCase
         $builder = $this->getBuilder();
         $builder->select('*')->from('users')->whereIntegerInRaw('id', ['1a', 2]);
         $this->assertSame('select * from "users" where "id" in (1, 2)', $builder->toSql());
+        $this->assertEquals([], $builder->getBindings());
+
+        $builder = $this->getBuilder();
+        $builder->select('*')->from('users')->whereIntegerInRaw('id', [
+            ['id' => '1a'],
+            ['id' => 2],
+            ['any' => '3'],
+        ]);
+        $this->assertSame('select * from "users" where "id" in (1, 2, 3)', $builder->toSql());
         $this->assertEquals([], $builder->getBindings());
     }
 
@@ -1508,6 +1551,27 @@ class DatabaseQueryBuilderTest extends TestCase
         $this->assertSame('select * from "users" order by "updated_at" asc', $builder->toSql());
     }
 
+    public function testInRandomOrderMySql()
+    {
+        $builder = $this->getBuilder();
+        $builder->select('*')->from('users')->inRandomOrder();
+        $this->assertSame('select * from "users" order by RANDOM()', $builder->toSql());
+    }
+
+    public function testInRandomOrderPostgres()
+    {
+        $builder = $this->getPostgresBuilder();
+        $builder->select('*')->from('users')->inRandomOrder();
+        $this->assertSame('select * from "users" order by RANDOM()', $builder->toSql());
+    }
+
+    public function testInRandomOrderSqlServer()
+    {
+        $builder = $this->getSqlServerBuilder();
+        $builder->select('*')->from('users')->inRandomOrder();
+        $this->assertSame('select * from [users] order by NEWID()', $builder->toSql());
+    }
+
     public function testOrderBysSqlServer()
     {
         $builder = $this->getSqlServerBuilder();
@@ -1955,6 +2019,22 @@ class DatabaseQueryBuilderTest extends TestCase
         });
         $this->assertSame('select * from "users" where "name" = ? or not ("email" = ?)', $builder->toSql());
         $this->assertEquals([0 => 'bar', 1 => 'foo'], $builder->getBindings());
+    }
+
+    public function testIncrementManyArgumentValidation1()
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Non-numeric value passed as increment amount for column: \'col\'.');
+        $builder = $this->getBuilder();
+        $builder->from('users')->incrementEach(['col' => 'a']);
+    }
+
+    public function testIncrementManyArgumentValidation2()
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Non-associative array passed to incrementEach method.');
+        $builder = $this->getBuilder();
+        $builder->from('users')->incrementEach([11 => 11]);
     }
 
     public function testWhereNotWithArrayConditions()
@@ -2443,6 +2523,15 @@ class DatabaseQueryBuilderTest extends TestCase
         $this->assertSame('bar', $results);
     }
 
+    public function testRawValueMethodReturnsSingleColumn()
+    {
+        $builder = $this->getBuilder();
+        $builder->getConnection()->shouldReceive('select')->once()->with('select UPPER("foo") from "users" where "id" = ? limit 1', [1], true)->andReturn([['UPPER("foo")' => 'BAR']]);
+        $builder->getProcessor()->shouldReceive('processSelect')->once()->with($builder, [['UPPER("foo")' => 'BAR']])->andReturn([['UPPER("foo")' => 'BAR']]);
+        $results = $builder->from('users')->where('id', '=', 1)->rawValue('UPPER("foo")');
+        $this->assertSame('BAR', $results);
+    }
+
     public function testAggregateFunctions()
     {
         $builder = $this->getBuilder();
@@ -2485,6 +2574,22 @@ class DatabaseQueryBuilderTest extends TestCase
             return $results;
         });
         $results = $builder->from('users')->sum('id');
+        $this->assertEquals(1, $results);
+
+        $builder = $this->getBuilder();
+        $builder->getConnection()->shouldReceive('select')->once()->with('select avg("id") as aggregate from "users"', [], true)->andReturn([['aggregate' => 1]]);
+        $builder->getProcessor()->shouldReceive('processSelect')->once()->andReturnUsing(function ($builder, $results) {
+            return $results;
+        });
+        $results = $builder->from('users')->avg('id');
+        $this->assertEquals(1, $results);
+
+        $builder = $this->getBuilder();
+        $builder->getConnection()->shouldReceive('select')->once()->with('select avg("id") as aggregate from "users"', [], true)->andReturn([['aggregate' => 1]]);
+        $builder->getProcessor()->shouldReceive('processSelect')->once()->andReturnUsing(function ($builder, $results) {
+            return $results;
+        });
+        $results = $builder->from('users')->average('id');
         $this->assertEquals(1, $results);
     }
 
@@ -4586,6 +4691,47 @@ SQL;
         ]), $result);
     }
 
+    public function testCursorPaginateWithDynamicColumnWithCastInSelectRaw()
+    {
+        $perPage = 15;
+        $cursorName = 'cursor';
+        $cursor = new Cursor(['test' => 'bar']);
+        $builder = $this->getMockQueryBuilder();
+        $builder->from('foobar')->select('*')->selectRaw('(CAST(CONCAT(firstname, \' \', lastname) as VARCHAR)) as test')->orderBy('test');
+        $builder->shouldReceive('newQuery')->andReturnUsing(function () use ($builder) {
+            return new Builder($builder->connection, $builder->grammar, $builder->processor);
+        });
+
+        $path = 'http://foo.bar?cursor='.$cursor->encode();
+
+        $results = collect([['test' => 'foo'], ['test' => 'bar']]);
+
+        $builder->shouldReceive('get')->once()->andReturnUsing(function () use ($builder, $results) {
+            $this->assertEquals(
+                'select *, (CAST(CONCAT(firstname, \' \', lastname) as VARCHAR)) as test from "foobar" where ((CAST(CONCAT(firstname, \' \', lastname) as VARCHAR)) > ?) order by "test" asc limit 16',
+                $builder->toSql());
+            $this->assertEquals(['bar'], $builder->bindings['where']);
+
+            return $results;
+        });
+
+        CursorPaginator::currentCursorResolver(function () use ($cursor) {
+            return $cursor;
+        });
+
+        Paginator::currentPathResolver(function () use ($path) {
+            return $path;
+        });
+
+        $result = $builder->cursorPaginate();
+
+        $this->assertEquals(new CursorPaginator($results, $perPage, $cursor, [
+            'path' => $path,
+            'cursorName' => $cursorName,
+            'parameters' => ['test'],
+        ]), $result);
+    }
+
     public function testCursorPaginateWithDynamicColumnInSelectSub()
     {
         $perPage = 15;
@@ -5185,6 +5331,18 @@ SQL;
         $this->assertEquals([1], $builder->getBindings());
     }
 
+    public function testFrom()
+    {
+        $builder = $this->getBuilder();
+        $builder->from($this->getBuilder()->from('users'), 'u');
+        $this->assertSame('select * from (select * from "users") as "u"', $builder->toSql());
+
+        $builder = $this->getBuilder();
+        $eloquentBuilder = new EloquentBuilder($this->getBuilder());
+        $builder->from($eloquentBuilder->from('users'), 'u');
+        $this->assertSame('select * from (select * from "users") as "u"', $builder->toSql());
+    }
+
     public function testFromSub()
     {
         $builder = $this->getBuilder();
@@ -5258,6 +5416,69 @@ SQL;
         $builder = $this->getPostgresBuilder();
         $builder->select('*')->from('users')->where('roles', '?&', 'superuser');
         $this->assertSame('select * from "users" where "roles" ??& ?', $builder->toSql());
+    }
+
+    public function testUseIndexMySql()
+    {
+        $builder = $this->getMySqlBuilder();
+        $builder->select('foo')->from('users')->useIndex('test_index');
+        $this->assertSame('select `foo` from `users` use index (test_index)', $builder->toSql());
+    }
+
+    public function testForceIndexMySql()
+    {
+        $builder = $this->getMySqlBuilder();
+        $builder->select('foo')->from('users')->forceIndex('test_index');
+        $this->assertSame('select `foo` from `users` force index (test_index)', $builder->toSql());
+    }
+
+    public function testIgnoreIndexMySql()
+    {
+        $builder = $this->getMySqlBuilder();
+        $builder->select('foo')->from('users')->ignoreIndex('test_index');
+        $this->assertSame('select `foo` from `users` ignore index (test_index)', $builder->toSql());
+    }
+
+    public function testUseIndexSqlite()
+    {
+        $builder = $this->getSQLiteBuilder();
+        $builder->select('foo')->from('users')->useIndex('test_index');
+        $this->assertSame('select "foo" from "users"', $builder->toSql());
+    }
+
+    public function testForceIndexSqlite()
+    {
+        $builder = $this->getSQLiteBuilder();
+        $builder->select('foo')->from('users')->forceIndex('test_index');
+        $this->assertSame('select "foo" from "users" indexed by test_index', $builder->toSql());
+    }
+
+    public function testIgnoreIndexSqlite()
+    {
+        $builder = $this->getSQLiteBuilder();
+        $builder->select('foo')->from('users')->ignoreIndex('test_index');
+        $this->assertSame('select "foo" from "users"', $builder->toSql());
+    }
+
+    public function testUseIndexSqlServer()
+    {
+        $builder = $this->getSqlServerBuilder();
+        $builder->select('foo')->from('users')->useIndex('test_index');
+        $this->assertSame('select [foo] from [users]', $builder->toSql());
+    }
+
+    public function testForceIndexSqlServer()
+    {
+        $builder = $this->getSqlServerBuilder();
+        $builder->select('foo')->from('users')->forceIndex('test_index');
+        $this->assertSame('select [foo] from [users] with (index(test_index))', $builder->toSql());
+    }
+
+    public function testIgnoreIndexSqlServer()
+    {
+        $builder = $this->getSqlServerBuilder();
+        $builder->select('foo')->from('users')->ignoreIndex('test_index');
+        $this->assertSame('select [foo] from [users]', $builder->toSql());
     }
 
     public function testClone()
