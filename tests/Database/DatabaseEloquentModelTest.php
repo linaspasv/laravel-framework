@@ -349,6 +349,25 @@ class DatabaseEloquentModelTest extends TestCase
         $this->assertTrue($model->hasCast('enumAttribute', StringStatus::class));
     }
 
+    public function testAttributesToArrayWithCastsOnEnumAttribute()
+    {
+        $model = new EloquentModelAccessorWithEnumCastingStub();
+
+        $attributes = $model->attributesToArray();
+
+        $this->assertArrayHasKey('enum_attribute', $attributes);
+        $this-assertEquals('pending', $attributes['enum_attribute']);
+
+        $this->assertArrayHasKey('enum_object_attribute', $attributes);
+        $this-assertEquals('pending', $attributes['enum_object_attribute']);
+
+        $this->assertArrayHasKey('enum_new_attribute', $attributes);
+        $this-assertEquals('pending', $attributes['enum_new_attribute']);
+
+        $this->assertArrayHasKey('enum_new_object_attribute', $attributes);
+        $this-assertEquals('pending', $attributes['enum_new_object_attribute']);
+    }
+
     public function testCleanAttributes()
     {
         $model = new EloquentModelStub(['foo' => '1', 'bar' => 2, 'baz' => 3]);
@@ -3056,6 +3075,36 @@ class EloquentModelCastingStub extends Model
 class EloquentModelEnumCastingStub extends Model
 {
     protected $casts = ['enumAttribute' => StringStatus::class];
+}
+
+class EloquentModelAccessorWithEnumCastingStub extends Model
+{
+    protected $casts = [
+        'enumAttribute' => StringStatus::class,
+        'enumObjectAttribute' => StringStatus::class,
+        'enumNewAttribute' => StringStatus::class,
+        'enumNewObjectAttribute' => StringStatus::class,
+    ];
+
+    public function getEnumAttributeAttribute($value)
+    {
+        return StringStatus::pending->value;
+    }
+
+    public function getEnumObjectAttributeAttribute($value)
+    {
+        return StringStatus::pending;
+    }
+
+    public function enumNewAttribute(): Attribute
+    {
+        return Attribute::get(fn ($value) => StringStatus::pending->value);
+    }
+
+    public function enumNewObjectAttribute(): Attribute
+    {
+        return Attribute::get(fn ($value) => $this->castAttribute('enumNewObjectAttribute', StringStatus::pending->value));
+    }
 }
 
 class EloquentModelDynamicHiddenStub extends Model
